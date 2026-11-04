@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PitchBlob</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>PitchBlob</h1>
+    <p>Stage 1: load a vocal recording and see its waveform</p>
+  </header>
+
+  <main>
+    <!-- The real file input is hidden; the label acts as the big button -->
+    <label class="btn" for="file">Choose audio file</label>
+    <input id="file" type="file" accept="audio/*" hidden>
+
+    <p id="status">No audio loaded yet.</p>
+
+    <canvas id="wave"></canvas>
+
+    <div class="controls">
+      <button id="play" disabled>Play</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+  </main>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+*.log
+# test recordings you don't want to publish
+*.wav
+*.mp3
+*.m4a
