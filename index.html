@@ -3,29 +3,35 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PitchBlob</title>
+  <title>PitchOne</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <h1>PitchBlob</h1>
-    <p>Stage 1: load a vocal recording and see its waveform</p>
-  </header>
+  <header class="topbar">
+    <h1>PitchOne</h1>
 
-  <main>
-    <!-- The real file input is hidden; the label acts as the big button -->
-    <label class="btn" for="file">Choose audio file</label>
+    <!-- The real file input is hidden; the label acts as the button -->
+    <label class="btn" for="file">Open audio</label>
     <input id="file" type="file" accept="audio/*" hidden>
 
-    <p id="status">No audio loaded yet.</p>
+    <button id="play" disabled>Play</button>
+    <button id="stop" disabled>Stop</button>
 
-    <canvas id="wave"></canvas>
+    <p id="status">Open a vocal recording to start.</p>
+    <output id="readout">--</output>
+  </header>
 
-    <div class="controls">
-      <button id="play" disabled>Play</button>
-      <button id="stop" disabled>Stop</button>
-    </div>
+  <p class="rotate-hint">Tip: turn your phone sideways for more room.</p>
+
+  <!-- Big area: note rows + detected pitch curve -->
+  <main class="pitch-area">
+    <canvas id="pitch"></canvas>
   </main>
+
+  <!-- Small strip at the bottom: the waveform -->
+  <footer class="wave-area">
+    <canvas id="wave"></canvas>
+  </footer>
 
   <script type="module" src="src/main.js"></script>
 </body>

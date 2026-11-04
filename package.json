@@ -1,0 +1,11 @@
+{
+  "name": "pitchone",
+  "version": "0.2.0",
+  "description": "Open-source vocal pitch editor for phones (single voice, runs in the browser)",
+  "type": "module",
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "test": "node tests/yin.test.js"
+  },
+  "license": "MIT"
+}
