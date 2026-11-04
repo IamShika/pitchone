@@ -1,227 +1,287 @@
 // pitchview.js
-// Draws the "piano roll": note rows in the background, the detected pitch
-// curve on top, and a white playhead line while the audio plays.
+// The "roll": piano-style note rows in the background, the notes drawn as warm
+// gradient BLOBS, the pitch line inside each blob, and a playhead while playing.
+//
+// Everything here is drawn in CSS pixels (the canvas is scaled for sharp
+// phone screens with setTransform). The view (src/view.js) says which part of
+// the recording and which notes are on screen.
 
-import { freqToMidi, midiToName, isBlackKey } from "./notes.js";
+import { colors } from "./theme.js";
+import { midiToName, isBlackKey } from "./notes.js";
+import { editedCurve, isEdited } from "./correct.js";
+import { createView, fitView, clampView, xOfTime, timeOfX, yOfMidi, midiOfY, chooseTimeStep } from "./view.js";
 
 // Width of the note-name column on the left, in CSS pixels. main.js reads this
-// so the waveform underneath lines up exactly with the pitch curve above.
+// so the waveform strip lines up with the roll.
 export const GUTTER_PX = 44;
 
-const COLORS = {
-  gutter: "#1d2029",
-  whiteRow: "#232734",
-  blackRow: "#1a1d27",
-  rowLine: "#2c3140",
-  octaveLine: "#4a5166",
-  timeLine: "#2c3140",
-  label: "#8b90a0",
-  curve: "#6c8cff",
-  playhead: "#ffffff",
-};
-
-// If the pitch jumps more than this many semitones in 10 ms, don't connect the
-// dots with a line (it is probably a detection glitch, not real singing).
-const MAX_JUMP = 2.5;
-
-/** Which range of notes should the roll show? */
-function chooseRange(midis) {
-  if (midis.length === 0) return [48, 72]; // C3 to C5 when there is nothing yet
-
-  // Ignore the most extreme 1% so one glitch can't squash the whole view.
-  const sorted = Float32Array.from(midis).sort();
-  const low = sorted[Math.floor(sorted.length * 0.01)];
-  const high = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
-
-  let lo = Math.floor(low) - 1;
-  let hi = Math.ceil(high) + 1;
-
-  // Always show at least one octave so the rows don't get huge.
-  while (hi - lo + 1 < 13) {
-    lo--;
-    if (hi - lo + 1 < 13) hi++;
-  }
-  return [lo, hi];
-}
-
-/** Pick a spacing for the vertical time lines so they are not too crowded. */
-function chooseTimeStep(pixelsPerSecond) {
-  const steps = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
-  for (const step of steps) {
-    if (step * pixelsPerSecond >= 70) return step;
-  }
-  return steps[steps.length - 1];
-}
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
 function formatTime(seconds, step) {
-  if (step < 1) return seconds.toFixed(1) + "s";
+  if (step < 1) return seconds.toFixed(step < 0.1 ? 2 : 1) + "s";
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return m + ":" + String(s).padStart(2, "0");
 }
 
-/**
- * Create a pitch view for a <canvas>.
- *
- * The background and the curve never change while the audio plays, so we paint
- * them ONCE into a hidden canvas ("layer"). Each animation frame then only
- * copies that picture and adds the playhead line. That keeps playback smooth.
- */
-export function createPitchView(canvas) {
-  let track = null;
-  let layer = null; // the cached background + curve
+export function createRoll(canvas) {
+  const view = createView();
+  let notes = [];
+  let refLevel = 1;
+  let hop = 0.01;
+  let duration = 10;
+  let selected = new Set();
 
-  function buildLayer() {
-    const w = canvas.width;
-    const h = canvas.height;
-    const dpr = canvas.clientWidth > 0 ? w / canvas.clientWidth : 1;
+  const roll = {
+    view,
+    userMoved: false, // becomes true once the user zooms or scrolls by hand
 
-    layer = document.createElement("canvas");
-    layer.width = w;
-    layer.height = h;
-    const ctx = layer.getContext("2d");
+    /** Size of the plot area (the roll without the note-name column), in CSS pixels. */
+    size() {
+      return {
+        width: Math.max(1, canvas.clientWidth - GUTTER_PX),
+        height: Math.max(1, canvas.clientHeight),
+        duration,
+      };
+    },
 
-    const gutter = Math.round(GUTTER_PX * dpr);
-    const plotW = w - gutter;
-    const duration = track ? track.duration : 10;
+    /** Give the roll new notes. */
+    setNotes(newNotes, newRefLevel, newHop, newDuration) {
+      notes = newNotes;
+      refLevel = newRefLevel;
+      hop = newHop;
+      duration = newDuration;
+      selected = new Set();
+      roll.fit();
+    },
 
-    // Work out which notes are shown
-    const midis = [];
-    if (track) {
-      for (let i = 0; i < track.freqs.length; i++) {
-        if (track.freqs[i] > 0) midis.push(freqToMidi(track.freqs[i]));
+    setSelection(set) {
+      selected = set;
+    },
+
+    /** Show the whole recording and all notes. */
+    fit() {
+      fitView(view, notes, roll.size());
+      roll.userMoved = false;
+    },
+
+    /** Match the canvas's pixel size to its on-screen size (call when the layout changes). */
+    resize() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(canvas.clientWidth * dpr);
+      canvas.height = Math.floor(canvas.clientHeight * dpr);
+      if (roll.userMoved) clampView(view, roll.size());
+      else roll.fit();
+    },
+
+    /** Which note is under this point? (x, y are relative to the canvas.) Returns an index or -1. */
+    hitTest(cx, cy) {
+      const x = cx - GUTTER_PX;
+      if (x < 0) return -1;
+      const reach = Math.max(view.rowH * 0.5 + 6, 12); // a bit generous (fingers are not precise), but leave room to scroll
+      let best = -1;
+      let bestDistance = Infinity;
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i];
+        if (x < xOfTime(view, n.start) - 8 || x > xOfTime(view, n.end) + 8) continue;
+        const dy = Math.abs(cy - yOfMidi(view, n.targetCenter));
+        if (dy <= reach && dy < bestDistance) {
+          best = i;
+          bestDistance = dy;
+        }
       }
-    }
-    const [lo, hi] = chooseRange(midis);
-    const rows = hi - lo + 1;
-    const rowH = h / rows;
-    const yOfNote = (midi) => h - (midi - lo + 0.5) * rowH; // centre of that note's row
+      return best;
+    },
 
-    // 1. Note rows (black keys are a bit darker, like a piano roll)
-    ctx.font = Math.round(11 * dpr) + "px system-ui, sans-serif";
-    ctx.textBaseline = "middle";
-    ctx.textAlign = "right";
-    for (let n = lo; n <= hi; n++) {
-      const top = h - (n - lo + 1) * rowH;
-      ctx.fillStyle = isBlackKey(n) ? COLORS.blackRow : COLORS.whiteRow;
-      ctx.fillRect(gutter, top, plotW, rowH);
-    }
-    // ...then the lines between rows (drawn second so the fills never cover them)
-    for (let n = lo; n <= hi; n++) {
-      const top = Math.round(h - (n - lo + 1) * rowH) + 0.5;
-      ctx.strokeStyle = n % 12 === 0 ? COLORS.octaveLine : COLORS.rowLine;
-      ctx.lineWidth = dpr;
-      ctx.beginPath();
-      ctx.moveTo(gutter, top);
-      ctx.lineTo(w, top);
-      ctx.stroke();
-    }
+    /** Draw everything. `playTime` is the playhead position in seconds, or null. */
+    draw(playTime = null) {
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      if (!cssW || !cssH || !canvas.width) return;
 
-    // 2. Time grid
-    const pxPerSec = plotW / duration; // device pixels per second
-    const step = chooseTimeStep(pxPerSec / dpr); // the helper wants CSS pixels
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    for (let t = 0; t <= duration; t += step) {
-      const x = Math.round(gutter + t * pxPerSec) + 0.5;
-      ctx.strokeStyle = COLORS.timeLine;
-      ctx.lineWidth = dpr;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-      ctx.fillStyle = COLORS.label;
-      ctx.fillText(formatTime(t, step), x + 4 * dpr, 3 * dpr);
-    }
+      const c = colors();
+      const dpr = canvas.width / cssW;
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
 
-    // 3. Note-name column on the left. Show every note if the rows are tall
-    //    enough to read, otherwise only the C of each octave.
-    ctx.fillStyle = COLORS.gutter;
-    ctx.fillRect(0, 0, gutter, h);
-    ctx.fillStyle = COLORS.label;
-    ctx.textAlign = "right";
-    ctx.textBaseline = "middle";
-    const labelEveryNote = rowH / dpr >= 15;
-    for (let n = lo; n <= hi; n++) {
-      if (labelEveryNote || n % 12 === 0) {
-        ctx.fillText(midiToName(n), gutter - 6 * dpr, yOfNote(n));
-      }
-    }
+      const plotW = cssW - GUTTER_PX;
+      const tLeft = timeOfX(view, 0);
+      const tRight = timeOfX(view, plotW);
+      const topNote = Math.ceil(midiOfY(view, 0)) + 1;
+      const bottomNote = Math.floor(midiOfY(view, cssH)) - 1;
 
-    // 4. The pitch curve
-    if (track) {
+      // ---- the plot area (clipped so nothing spills over the note names) ----
       ctx.save();
       ctx.beginPath();
-      ctx.rect(gutter, 0, plotW, h); // never draw over the note names
+      ctx.rect(GUTTER_PX, 0, plotW, cssH);
       ctx.clip();
+      ctx.translate(GUTTER_PX, 0);
 
-      ctx.strokeStyle = COLORS.curve;
-      ctx.lineWidth = 2.5 * dpr;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.beginPath();
+      ctx.fillStyle = c.plotBg;
+      ctx.fillRect(0, 0, plotW, cssH);
 
-      let previous = null; // MIDI value of the last voiced reading, or null after a gap
-      for (let i = 0; i < track.freqs.length; i++) {
-        const freq = track.freqs[i];
-        if (freq <= 0) {
-          previous = null; // unvoiced: break the line
-          continue;
-        }
-        const midi = freqToMidi(freq);
-        const x = gutter + i * track.hop * pxPerSec;
-        const y = yOfNote(midi);
-
-        if (previous === null || Math.abs(midi - previous) > MAX_JUMP) {
-          ctx.moveTo(x, y);
-          ctx.lineTo(x + 0.01, y); // a tiny dot, so a lone reading is still visible
-        } else {
-          ctx.lineTo(x, y);
-        }
-        previous = midi;
+      // note rows: black piano keys are a little darker
+      for (let n = bottomNote; n <= topNote; n++) {
+        ctx.fillStyle = isBlackKey(n) ? c.blackRow : c.whiteRow;
+        ctx.fillRect(0, yOfMidi(view, n) - view.rowH / 2, plotW, view.rowH + 0.5);
       }
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      ctx.fillStyle = COLORS.label;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.font = Math.round(14 * dpr) + "px system-ui, sans-serif";
-      ctx.fillText("Open a vocal recording to see its pitch", gutter + plotW / 2, h / 2);
-    }
-  }
+      // lines between rows; the line under every C is stronger (the octave border)
+      ctx.lineWidth = 1;
+      for (let n = bottomNote; n <= topNote; n++) {
+        const y = Math.round(yOfMidi(view, n) + view.rowH / 2) + 0.5;
+        ctx.strokeStyle = n % 12 === 0 ? c.octaveLine : c.rowLine;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(plotW, y);
+        ctx.stroke();
+      }
 
-  return {
-    /** Give the view a new pitch track (or null to clear it). */
-    setTrack(newTrack) {
-      track = newTrack;
-      layer = null;
-    },
-
-    /** Call after the canvas size changed. */
-    invalidate() {
-      layer = null;
-    },
-
-    /** Paint. `playhead` is 0..1 along the recording, or null to hide it. */
-    draw(playhead = null) {
-      if (canvas.width === 0 || canvas.height === 0) return;
-      if (!layer) buildLayer();
-
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(layer, 0, 0);
-
-      if (playhead !== null) {
-        const dpr = canvas.clientWidth > 0 ? canvas.width / canvas.clientWidth : 1;
-        const gutter = Math.round(GUTTER_PX * dpr);
-        const x = Math.round(gutter + playhead * (canvas.width - gutter)) + 0.5;
-        ctx.strokeStyle = COLORS.playhead;
-        ctx.lineWidth = 2 * dpr;
+      // time grid
+      const step = chooseTimeStep(view.pxPerSec);
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      for (let t = Math.ceil(tLeft / step) * step; t <= tRight; t += step) {
+        const x = Math.round(xOfTime(view, t)) + 0.5;
+        ctx.strokeStyle = c.timeLine;
         ctx.beginPath();
         ctx.moveTo(x, 0);
-        ctx.lineTo(x, canvas.height);
+        ctx.lineTo(x, cssH);
         ctx.stroke();
+        ctx.fillStyle = c.label;
+        ctx.fillText(formatTime(t, step), x + 4, 3);
+      }
+
+      // notes
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i];
+        if (n.end < tLeft || n.start > tRight) continue;
+        drawNote(ctx, c, n, selected.has(i));
+      }
+
+      if (notes.length === 0) {
+        ctx.fillStyle = c.label;
+        ctx.font = "14px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Open a vocal recording to see its notes", plotW / 2, cssH / 2);
+      }
+      ctx.restore();
+
+      // ---- the note-name column ----
+      ctx.fillStyle = c.gutter;
+      ctx.fillRect(0, 0, GUTTER_PX, cssH);
+      ctx.fillStyle = c.label;
+      ctx.font = Math.min(11, Math.floor(view.rowH) - 1) + "px system-ui, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      const labelEveryNote = view.rowH >= 10; // rows tall enough: name every note, otherwise just the Cs
+      for (let n = bottomNote; n <= topNote; n++) {
+        const y = yOfMidi(view, n);
+        if (y < 6 || y > cssH - 6) continue;
+        if (labelEveryNote || n % 12 === 0) ctx.fillText(midiToName(n), GUTTER_PX - 6, y);
+      }
+
+      // ---- playhead ----
+      if (playTime !== null) {
+        const x = Math.round(GUTTER_PX + xOfTime(view, playTime)) + 0.5;
+        if (x >= GUTTER_PX && x <= cssW) {
+          ctx.strokeStyle = c.playhead;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, cssH);
+          ctx.stroke();
+        }
       }
     },
   };
+
+  // ---- drawing one note ----
+  function drawNote(ctx, c, note, isSelected) {
+    const count = note.midi.length;
+    const pxPerFrame = hop * view.pxPerSec;
+    const stride = Math.max(1, Math.round(2 / pxPerFrame)); // at least ~2 px between points
+
+    // which frames we draw (always including the last one)
+    const frames = [];
+    for (let k = 0; k < count; k += stride) frames.push(k);
+    if (frames[frames.length - 1] !== count - 1) frames.push(count - 1);
+
+    const xOf = (k) => xOfTime(view, note.start + k * hop);
+    const xEnd = xOfTime(view, note.end);
+    const yCentre = yOfMidi(view, note.targetCenter);
+    const fullThick = Math.max(view.rowH * 0.95, 7);
+
+    // The blob is thicker where the singer is louder, and slightly tapered at both ends.
+    const halfThickness = (k) => {
+      const loud = clamp(note.level[k] / refLevel, 0, 1.2);
+      const body = 0.35 + 0.65 * Math.sqrt(Math.min(loud, 1));
+      const taper = Math.min(1, 0.55 + (0.45 * Math.min(k + 1, count - k)) / 4);
+      return (fullThick * body * taper) / 2;
+    };
+
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yCentre - halfThickness(0));
+    for (const k of frames) ctx.lineTo(xOf(k), yCentre - halfThickness(k));
+    ctx.lineTo(xEnd, yCentre - halfThickness(count - 1));
+    ctx.lineTo(xEnd, yCentre + halfThickness(count - 1));
+    for (let j = frames.length - 1; j >= 0; j--) ctx.lineTo(xOf(frames[j]), yCentre + halfThickness(frames[j]));
+    ctx.closePath();
+
+    const gradient = ctx.createLinearGradient(0, yCentre - fullThick / 2, 0, yCentre + fullThick / 2);
+    gradient.addColorStop(0, c.blobEdge);
+    gradient.addColorStop(0.3, c.blobMid);
+    gradient.addColorStop(0.5, c.blobCore);
+    gradient.addColorStop(0.7, c.blobMid);
+    gradient.addColorStop(1, c.blobEdge);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = c.blobEdge;
+    ctx.stroke();
+
+    // where the note was originally sung (only shown once it has been changed)
+    if (isEdited(note)) {
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = c.ghost;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      frames.forEach((k, j) => {
+        const x = xOf(k);
+        const y = yOfMidi(view, note.midi[k]);
+        if (j === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // the pitch line inside the blob
+    const curve = editedCurve(note);
+    ctx.strokeStyle = c.curve;
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    frames.forEach((k, j) => {
+      const x = xOf(k);
+      const y = yOfMidi(view, curve[k]);
+      if (j === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // a selected note gets a clear outline box around it
+    if (isSelected) {
+      const pad = 3;
+      ctx.strokeStyle = c.selected;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(xOf(0) - pad, yCentre - fullThick / 2 - pad, xEnd - xOf(0) + 2 * pad, fullThick + 2 * pad);
+    }
+  }
+
+  return roll;
 }

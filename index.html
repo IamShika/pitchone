@@ -2,36 +2,103 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
   <title>PitchOne</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar">
-    <h1>PitchOne</h1>
-
+  <!-- One slim toolbar. Icons have a title (long-press / hover) for what they do. -->
+  <header class="toolbar">
     <!-- The real file input is hidden; the label acts as the button -->
-    <label class="btn" for="file">Open audio</label>
+    <label class="btn" for="file">Open</label>
     <input id="file" type="file" accept="audio/*" hidden>
 
-    <button id="play" disabled>Play</button>
-    <button id="stop" disabled>Stop</button>
+    <button id="play" class="primary" disabled title="Play from the selected note, or from the left edge of the screen">Play</button>
+    <button id="correct" disabled title="Correct pitch of the selected notes (or all notes)">Correct Pitch</button>
 
-    <p id="status">Open a vocal recording to start.</p>
-    <output id="readout">--</output>
+    <span class="sep"></span>
+
+    <button id="undo" class="icon" disabled title="Undo" aria-label="Undo">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 5 4 10l5 5M4 10h9a6 6 0 0 1 0 12h-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button id="redo" class="icon" disabled title="Redo" aria-label="Redo">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="m15 5 5 5-5 5M20 10h-9a6 6 0 0 0 0 12h3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+
+    <span class="sep"></span>
+
+    <button id="zoom-out" class="icon" disabled title="Zoom out" aria-label="Zoom out">&minus;</button>
+    <button id="zoom-in" class="icon" disabled title="Zoom in" aria-label="Zoom in">+</button>
+    <button id="fit" class="icon" disabled title="Show everything" aria-label="Show everything">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 5v14M20 5v14M8 12h8M8 12l3-3M8 12l3 3M16 12l-3-3M16 12l-3 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+
+    <span class="spacer"></span>
+
+    <output id="readout" title="Pitch of the selected note, or of the sound while playing">--</output>
+
+    <button id="theme" class="icon" title="Light / dark" aria-label="Switch light or dark theme">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg>
+    </button>
+    <button id="full" class="icon" title="Full screen" aria-label="Full screen">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
   </header>
 
   <p class="rotate-hint">Tip: turn your phone sideways for more room.</p>
 
-  <!-- Big area: note rows + detected pitch curve -->
-  <main class="pitch-area">
+  <!-- The roll: note rows, blobs and the pitch lines -->
+  <main class="roll-area">
     <canvas id="pitch"></canvas>
   </main>
 
-  <!-- Small strip at the bottom: the waveform -->
+  <!-- Whole-recording overview. Tap or drag to jump around. -->
   <footer class="wave-area">
     <canvas id="wave"></canvas>
+    <p id="status">Open a vocal recording to start.</p>
   </footer>
+
+  <!-- The Correct Pitch window -->
+  <dialog id="correct-dialog">
+    <div class="dlg-title">Correct Pitch</div>
+    <div class="dlg-body">
+      <label class="dlg-row">
+        <span class="dlg-label">Pitch Center</span>
+        <input id="c-center" type="range" min="0" max="100" value="100">
+        <output id="c-center-out">100 %</output>
+      </label>
+      <label class="dlg-row">
+        <span class="dlg-label">Pitch Drift</span>
+        <input id="c-drift" type="range" min="0" max="100" value="0">
+        <output id="c-drift-out">0 %</output>
+      </label>
+      <div class="dlg-row dlg-wrap">
+        <label class="dlg-check"><input id="c-snap" type="checkbox" checked> Snap to scale</label>
+        <select id="c-key" aria-label="Key">
+          <option value="0">C</option><option value="1">C#</option><option value="2">D</option>
+          <option value="3">D#</option><option value="4">E</option><option value="5">F</option>
+          <option value="6">F#</option><option value="7">G</option><option value="8">G#</option>
+          <option value="9">A</option><option value="10">A#</option><option value="11">B</option>
+        </select>
+        <select id="c-scale" aria-label="Scale">
+          <option value="major">Major</option>
+          <option value="minor">Minor</option>
+          <option value="majorPentatonic">Major pentatonic</option>
+          <option value="minorPentatonic">Minor pentatonic</option>
+        </select>
+      </div>
+      <div class="dlg-row dlg-wrap">
+        <label class="dlg-check"><input id="c-manual" type="checkbox"> Include notes fine-tuned manually</label>
+      </div>
+    </div>
+    <div class="dlg-footer">
+      <span id="c-target">All notes</span>
+      <span class="spacer"></span>
+      <button id="c-cancel">Cancel</button>
+      <button id="c-ok" class="primary">OK</button>
+    </div>
+  </dialog>
 
   <script type="module" src="src/main.js"></script>
 </body>

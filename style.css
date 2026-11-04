@@ -1,13 +1,22 @@
 /* PitchOne styles
-   Designed for a phone held sideways (landscape): the pitch roll takes all the
-   spare space, controls sit in one slim bar on top. */
+   Built for a phone held sideways (landscape) where height is tight: one slim
+   toolbar on top, the roll takes all the spare space, a thin overview strip and
+   one status line at the bottom.
+
+   Colours come from CSS variables that src/theme.js sets for the light / dark theme. */
 
 :root {
-  --bg: #14161c;
-  --panel: #1d2029;
-  --text: #e8eaf0;
-  --muted: #8b90a0;
-  --accent: #6c8cff;
+  --bg: #e3e4e8;
+  --panel: #f1f1f4;
+  --text: #1d2130;
+  --muted: #555b6b;
+  --border: #b9bcc7;
+  --btn: #f7f7f9;
+  --btn-hover: #ffffff;
+  --accent: #2f55d4;
+  --accent-text: #ffffff;
+  --dialog: #dcdde2;
+  --dialog-title: #c9cad1;
   --gutter: 44px; /* width of the note-name column; set from src/pitchview.js */
 }
 
@@ -29,59 +38,84 @@ body {
   font-family: system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-/* ---- top bar ---- */
+/* ---- toolbar ---- */
 
-.topbar {
+.toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 10px;
-  padding: 8px 12px;
-}
-
-.topbar h1 {
-  margin: 0 6px 0 0;
-  font-size: 1.1rem;
+  gap: 6px;
+  padding: 6px 8px;
 }
 
 .btn,
 button {
   display: inline-flex;
   align-items: center;
-  min-height: 44px; /* easy to tap with a thumb */
-  padding: 8px 18px;
-  border: none;
-  border-radius: 10px;
-  background: var(--accent);
-  color: #0d1020; /* dark text on the blue: 6.1:1 contrast (white was only 3.1:1) */
+  justify-content: center;
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--btn);
+  color: var(--text);
   font: inherit;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   cursor: pointer;
 }
 
+.btn:hover,
+button:hover:not(:disabled) {
+  background: var(--btn-hover);
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+button.icon {
+  min-width: 40px;
+  padding: 6px;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
 button:disabled {
-  background: var(--panel);
-  color: var(--muted);
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-#status {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 0.85rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+button:focus-visible,
+.btn:focus-within,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-/* the live "A4 +12c" display while playing */
+.sep {
+  width: 1px;
+  height: 24px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* the "A4 +12c" display */
 #readout {
-  min-width: 5.5em;
-  font-size: 1.1rem;
+  min-width: 5.2em;
+  padding: 0 8px;
+  font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -89,7 +123,7 @@ button:disabled {
 .rotate-hint {
   display: none;
   margin: 0;
-  padding: 0 12px 6px;
+  padding: 0 10px 6px;
   color: var(--muted);
   font-size: 0.85rem;
 }
@@ -100,13 +134,13 @@ button:disabled {
   }
 }
 
-/* ---- the two drawing areas ---- */
+/* ---- the roll ---- */
 
-.pitch-area {
+.roll-area {
   position: relative;
   flex: 1;
   min-height: 0; /* lets the canvas shrink instead of pushing the page taller */
-  margin: 0 12px;
+  margin: 0 8px;
 }
 
 #pitch {
@@ -114,20 +148,136 @@ button:disabled {
   inset: 0;
   width: 100%;
   height: 100%;
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  touch-action: none; /* we handle every finger gesture ourselves */
 }
+
+/* ---- overview strip + status ---- */
 
 .wave-area {
-  padding: 8px 12px 12px;
+  padding: 6px 8px 6px;
 }
 
-/* The waveform starts after the note-name column, so it lines up with the
-   pitch curve above it. */
+/* The overview starts after the note-name column so it lines up with the roll
+   when you are zoomed out. */
 #wave {
   display: block;
   width: calc(100% - var(--gutter));
-  height: 56px;
+  height: 34px;
   margin-left: var(--gutter);
-  background: var(--panel);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  touch-action: none;
+}
+
+#status {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- the Correct Pitch window ---- */
+
+dialog {
+  width: min(560px, 96vw);
+  max-height: 96dvh;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--dialog);
+  color: var(--text);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.dlg-title {
+  padding: 7px 12px;
+  background: var(--dialog-title);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.dlg-body {
+  padding: 10px 14px 4px;
+}
+
+.dlg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.dlg-label {
+  width: 6.5em;
+  font-size: 0.9rem;
+}
+
+.dlg-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  accent-color: var(--accent);
+}
+
+.dlg-row output {
+  width: 3.6em;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dlg-wrap {
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.dlg-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  font-size: 0.9rem;
+}
+
+.dlg-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+select {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+select:disabled {
+  opacity: 0.45;
+}
+
+.dlg-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 12px;
+}
+
+#c-target {
+  color: var(--muted);
+  font-size: 0.85rem;
 }

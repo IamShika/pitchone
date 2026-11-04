@@ -1,7 +1,12 @@
 // waveform.js
-// Two small functions:
+// The waveform strip at the bottom. It always shows the WHOLE recording, with a
+// highlighted box marking the part you are currently looking at in the roll.
+// Tap or drag on it to jump around a long recording.
+//
 //   computePeaks  - squeezes the audio into one (min, max) pair per pixel column
 //   drawWaveform  - paints those pairs onto a <canvas>
+
+import { colors } from "./theme.js";
 
 /**
  * An audio file has MANY samples (44,100 per second!), but the screen only has
@@ -13,7 +18,7 @@
  * @returns {Float32Array}           [min0, max0, min1, max1, ...]
  */
 export function computePeaks(audioBuffer, width) {
-  const samples = audioBuffer.getChannelData(0); // first channel is enough for now
+  const samples = audioBuffer.getChannelData(0); // first channel is enough for the picture
   const samplesPerPixel = Math.max(1, Math.floor(samples.length / width));
   const peaks = new Float32Array(width * 2);
 
@@ -42,48 +47,63 @@ export function computePeaks(audioBuffer, width) {
 }
 
 /**
- * Paint the waveform. `playhead` is a number from 0 (start) to 1 (end),
- * or null to hide the playhead line.
+ * Paint the waveform.
  *
  * @param {HTMLCanvasElement} canvas
  * @param {Float32Array|null} peaks   output of computePeaks (null = empty canvas)
- * @param {number|null} playhead
+ * @param {number|null} playhead      0 (start) to 1 (end), or null to hide the playhead
+ * @param {{from:number, to:number}|null} visible
+ *        the part of the recording visible in the roll, as fractions 0..1
  */
-export function drawWaveform(canvas, peaks, playhead = null) {
+export function drawWaveform(canvas, peaks, playhead = null, visible = null) {
+  const c = colors();
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
   const mid = h / 2;
+  const dpr = canvas.clientWidth > 0 ? w / canvas.clientWidth : 1;
 
   ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = c.waveBg;
+  ctx.fillRect(0, 0, w, h);
 
-  // center line
-  ctx.strokeStyle = "#3a3f50";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, mid);
-  ctx.lineTo(w, mid);
-  ctx.stroke();
-
-  if (!peaks) return;
-
-  // one vertical line per pixel column, from its min to its max
-  ctx.strokeStyle = "#6c8cff";
-  ctx.beginPath();
-  const columns = peaks.length / 2;
-  for (let x = 0; x < columns; x++) {
-    const yTop = mid - peaks[x * 2 + 1] * mid;
-    const yBottom = mid - peaks[x * 2] * mid;
-    ctx.moveTo(x + 0.5, yTop);
-    ctx.lineTo(x + 0.5, Math.max(yBottom, yTop + 1)); // at least 1px tall
+  if (peaks) {
+    // one vertical line per pixel column, from its min to its max
+    ctx.strokeStyle = c.wave;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const columns = peaks.length / 2;
+    for (let x = 0; x < columns; x++) {
+      const yTop = mid - peaks[x * 2 + 1] * mid * 0.95;
+      const yBottom = mid - peaks[x * 2] * mid * 0.95;
+      ctx.moveTo(x + 0.5, yTop);
+      ctx.lineTo(x + 0.5, Math.max(yBottom, yTop + 1)); // at least 1px tall
+    }
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = c.wave;
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
   }
-  ctx.stroke();
+
+  // the box showing what the roll above is currently zoomed to
+  if (visible) {
+    const x1 = Math.round(visible.from * w);
+    const x2 = Math.max(x1 + 3 * dpr, Math.round(visible.to * w));
+    ctx.fillStyle = c.waveWindow;
+    ctx.fillRect(x1, 0, x2 - x1, h);
+    ctx.strokeStyle = c.waveWindowEdge;
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeRect(x1 + dpr, dpr, x2 - x1 - 2 * dpr, h - 2 * dpr);
+  }
 
   // playhead
   if (playhead !== null) {
     const px = Math.round(playhead * w) + 0.5;
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = c.playhead;
+    ctx.lineWidth = 2 * dpr;
     ctx.beginPath();
     ctx.moveTo(px, 0);
     ctx.lineTo(px, h);

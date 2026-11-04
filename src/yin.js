@@ -8,8 +8,9 @@
 //
 // Usage:
 //   const yin = createYin({ sampleRate: 15000 });
-//   const { freq, clarity } = yin.detect(samples, startIndex);
+//   const { freq, clarity, rms } = yin.detect(samples, startIndex);
 //   // freq is in Hz, or 0 if there is no clear pitch (silence, noise, "s" sounds)
+//   // rms is how loud that slice of audio is (0 = silent, about 0.3 = loud)
 //   // yin.frameLength tells you how many samples detect() reads from startIndex.
 
 export function createYin({
@@ -24,15 +25,16 @@ export function createYin({
   const tauMax = Math.ceil(sampleRate / minFreq);               // longest period
   const d = new Float32Array(tauMax + 1);                       // scratch space
 
-  const NO_PITCH = { freq: 0, clarity: 0 };
-
   function detect(x, start) {
     // 0. Skip silence. Without this, YIN would try to find a pitch in hiss.
+    //    We also report the loudness (rms) because the note blobs are drawn
+    //    thicker where the singer is louder.
     let energy = 0;
     for (let j = 0; j < windowSize; j++) {
       energy += x[start + j] * x[start + j];
     }
-    if (Math.sqrt(energy / windowSize) < silenceRms) return NO_PITCH;
+    const rms = Math.sqrt(energy / windowSize);
+    if (rms < silenceRms) return { freq: 0, clarity: 0, rms };
 
     // 1. Difference function: how different is the audio from a copy of
     //    itself shifted by `tau` samples? 0 = identical.
@@ -66,7 +68,7 @@ export function createYin({
         break;
       }
     }
-    if (best < 0) return NO_PITCH;
+    if (best < 0) return { freq: 0, clarity: 0, rms };
 
     // 4. Parabolic interpolation: the true period is usually between two whole
     //    samples. Fit a parabola through three points to estimate where the
@@ -78,7 +80,7 @@ export function createYin({
     const shift = denominator === 0 ? 0 : (0.5 * (a - c)) / denominator;
     const period = best + shift;
 
-    return { freq: sampleRate / period, clarity: 1 - b };
+    return { freq: sampleRate / period, clarity: 1 - b, rms };
   }
 
   return {

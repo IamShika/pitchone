@@ -1,79 +1,183 @@
 // main.js
-// Stage 2: open an audio file -> draw the waveform -> find the pitch over time
-// -> draw the pitch curve on a piano roll -> play / stop with a moving playhead.
+// Wires everything together:
+//   open a file -> decode -> find the pitch -> cut it into notes -> show blobs
+//   tap / drag / zoom the notes, Correct Pitch, undo, play.
+//
+// Stage 3 + 4: you can edit the pitch of notes on screen. The SOUND is not
+// changed yet (that is Stage 5), so Play still plays the original recording.
 
 import { computePeaks, drawWaveform } from "./waveform.js";
 import { analyzePitch, frameAt } from "./pitch.js";
-import { createPitchView, GUTTER_PX } from "./pitchview.js";
+import { buildNotes } from "./segment.js";
+import { createRoll, GUTTER_PX } from "./pitchview.js";
+import { attachGestures } from "./gestures.js";
+import { clampView, zoomAt } from "./view.js";
 import { freqToMidi, midiToName, centsOff } from "./notes.js";
+import { takeSnapshot, restoreSnapshot, snapshotsEqual, moveNotes, correctPitch } from "./correct.js";
+import { createHistory } from "./history.js";
+import { openCorrectDialog } from "./correctdialog.js";
+import { loadTheme, setTheme, themeName } from "./theme.js";
 
-// ---- grab the things we need from the page ----
-const fileInput = document.getElementById("file");
-const waveCanvas = document.getElementById("wave");
-const pitchCanvas = document.getElementById("pitch");
-const statusEl = document.getElementById("status");
-const readoutEl = document.getElementById("readout");
-const playBtn = document.getElementById("play");
-const stopBtn = document.getElementById("stop");
+// ---- the things on the page ----
+const $ = (id) => document.getElementById(id);
+const fileInput = $("file");
+const waveCanvas = $("wave");
+const pitchCanvas = $("pitch");
+const statusEl = $("status");
+const readoutEl = $("readout");
+const playBtn = $("play");
+const correctBtn = $("correct");
+const undoBtn = $("undo");
+const redoBtn = $("redo");
+const zoomInBtn = $("zoom-in");
+const zoomOutBtn = $("zoom-out");
+const fitBtn = $("fit");
+const themeBtn = $("theme");
+const fullBtn = $("full");
 
-const pitchView = createPitchView(pitchCanvas);
-
-// Tell the stylesheet how wide the note-name column is (keeps both canvases aligned).
+loadTheme();
 document.documentElement.style.setProperty("--gutter", GUTTER_PX + "px");
 
-// ---- app state (the things that change while the app runs) ----
-let audioCtx = null;     // the Web Audio "engine" (created on first tap)
-let audioBuffer = null;  // the decoded audio data
-let peaks = null;        // squeezed waveform for drawing
-let track = null;        // the pitch track from pitch.js (null until analysed)
-let source = null;       // the node that is currently playing (or null)
-let startedAt = 0;       // audioCtx.currentTime when playback started
-let animationId = 0;     // handle for the playhead animation loop
-let loadId = 0;          // bumps on every new file, so old analyses can be cancelled
+const roll = createRoll(pitchCanvas);
+const view = roll.view;
+const history = createHistory();
 
-function setStatus(text) {
-  statusEl.textContent = text;
-}
+// ---- app state (the things that change while the app runs) ----
+let audioCtx = null;      // the Web Audio "engine" (created on the first tap)
+let audioBuffer = null;   // the decoded audio data
+let peaks = null;         // squeezed waveform for drawing
+let track = null;         // raw pitch readings from pitch.js
+let notes = [];           // the notes (blobs) from segment.js
+let selected = new Set(); // indices of selected notes
+let source = null;        // the node that is currently playing (or null)
+let startedAt = 0;        // audioCtx.currentTime minus the position we started from
+let animationId = 0;      // handle for the playback animation loop
+let loadId = 0;           // bumps on every new file, so old analyses can be cancelled
+let dragStart = null;     // snapshot taken when a drag begins
+let drawQueued = false;
+
+const setStatus = (text) => (statusEl.textContent = text);
 
 // ---- drawing ----
-function redraw(playhead = null) {
-  drawWaveform(waveCanvas, peaks, playhead);
-  pitchView.draw(playhead);
+function playTime() {
+  return source ? audioCtx.currentTime - startedAt : null;
 }
 
-// Make the canvases sharp on high-DPI phone screens.
-function sizeCanvas(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.floor(canvas.clientWidth * dpr);
-  canvas.height = Math.floor(canvas.clientHeight * dpr);
-}
+function redraw() {
+  const t = playTime();
+  roll.draw(t);
 
-function resizeCanvases() {
-  sizeCanvas(waveCanvas);
-  sizeCanvas(pitchCanvas);
-  pitchView.invalidate();
+  // the overview strip: whole recording + a box for what the roll shows
+  let visible = null;
   if (audioBuffer) {
-    peaks = computePeaks(audioBuffer, waveCanvas.width);
+    const seconds = roll.size().width / view.pxPerSec;
+    visible = { from: view.t0 / audioBuffer.duration, to: (view.t0 + seconds) / audioBuffer.duration };
   }
+  drawWaveform(waveCanvas, peaks, t === null || !audioBuffer ? null : t / audioBuffer.duration, visible);
+}
+
+/** Ask for a redraw soon (several requests in one moment become one redraw). */
+function requestDraw() {
+  if (drawQueued || source) return; // while playing, tick() redraws anyway
+  drawQueued = true;
+  requestAnimationFrame(() => {
+    drawQueued = false;
+    redraw();
+  });
+}
+
+function sizeCanvases() {
+  roll.resize();
+  const dpr = window.devicePixelRatio || 1;
+  waveCanvas.width = Math.floor(waveCanvas.clientWidth * dpr);
+  waveCanvas.height = Math.floor(waveCanvas.clientHeight * dpr);
+  if (audioBuffer) peaks = computePeaks(audioBuffer, waveCanvas.width);
   redraw();
 }
 
-// ---- the "A4 +12c" display ----
-function showReadout(seconds) {
-  if (!track) {
-    readoutEl.textContent = "--";
-    return;
-  }
-  const freq = track.freqs[frameAt(track, seconds)];
-  if (freq <= 0) {
-    readoutEl.textContent = "--";
-    return;
-  }
-  const midi = freqToMidi(freq);
-  const cents = centsOff(midi);
-  const sign = cents > 0 ? "+" : "";
-  readoutEl.textContent = midiToName(midi) + " " + sign + cents + "c";
+function updateButtons() {
+  const hasNotes = notes.length > 0;
+  playBtn.disabled = !audioBuffer;
+  playBtn.textContent = source ? "Stop" : "Play";
+  correctBtn.disabled = !hasNotes;
+  zoomInBtn.disabled = !hasNotes;
+  zoomOutBtn.disabled = !hasNotes;
+  fitBtn.disabled = !hasNotes;
+  undoBtn.disabled = !history.canUndo();
+  redoBtn.disabled = !history.canRedo();
 }
+
+// ---- the "A4 +12c" display ----
+function describePitch(midi) {
+  const cents = centsOff(midi);
+  return midiToName(midi) + " " + (cents > 0 ? "+" : "") + cents + "c";
+}
+
+function showSelectionReadout() {
+  if (selected.size === 1) {
+    readoutEl.textContent = describePitch(notes[[...selected][0]].targetCenter);
+  } else if (selected.size > 1) {
+    readoutEl.textContent = selected.size + " notes";
+  } else {
+    readoutEl.textContent = "--";
+  }
+}
+
+function showPlaybackReadout(seconds) {
+  const freq = track ? track.freqs[frameAt(track, seconds)] : 0;
+  readoutEl.textContent = freq > 0 ? describePitch(freqToMidi(freq)) : "--";
+}
+
+// ---- selecting and dragging notes (called by gestures.js) ----
+function setSelection(indices) {
+  selected = new Set(indices);
+  roll.setSelection(selected);
+  if (!source) showSelectionReadout();
+  requestDraw();
+}
+
+const gestureApi = {
+  roll,
+  getSelection: () => selected,
+  select: (indices) => setSelection(indices),
+  toggle: (index) => {
+    const next = new Set(selected);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    setSelection([...next]);
+  },
+  clearSelection: () => setSelection([]),
+
+  beginDrag() {
+    dragStart = takeSnapshot(notes);
+  },
+  dragBy(semitones) {
+    moveNotes(notes, [...selected], dragStart, semitones);
+    if (!source) showSelectionReadout();
+    requestDraw();
+  },
+  endDrag() {
+    const changed = notes.some((n, i) => Math.abs(n.targetCenter - dragStart[i].targetCenter) > 1e-6);
+    if (changed) history.record(dragStart);
+    else restoreSnapshot(notes, dragStart);
+    dragStart = null;
+    updateButtons();
+    requestDraw();
+  },
+  cancelDrag() {
+    if (dragStart) restoreSnapshot(notes, dragStart);
+    dragStart = null;
+    if (!source) showSelectionReadout();
+    requestDraw();
+  },
+
+  requestDraw,
+  fit() {
+    roll.fit();
+    requestDraw();
+  },
+};
+attachGestures(pitchCanvas, gestureApi);
 
 // ---- opening a file ----
 fileInput.addEventListener("change", async () => {
@@ -83,9 +187,13 @@ fileInput.addEventListener("change", async () => {
   const myLoad = ++loadId; // if the user opens another file, this number becomes stale
   stop();
   track = null;
-  pitchView.setTrack(null);
+  notes = [];
+  selected = new Set();
+  history.clear();
+  roll.setNotes([], 1, 0.01, audioBuffer ? audioBuffer.duration : 10);
   readoutEl.textContent = "--";
   setStatus("Reading " + file.name + " ...");
+  updateButtons();
 
   try {
     // Browsers only allow audio to start after a user tap, so we create
@@ -97,43 +205,126 @@ fileInput.addEventListener("change", async () => {
     if (myLoad !== loadId) return;
 
     peaks = computePeaks(audioBuffer, waveCanvas.width);
+    roll.setNotes([], 1, 0.01, audioBuffer.duration);
+    updateButtons();
     redraw();
-    playBtn.disabled = false;
-    stopBtn.disabled = false;
 
-    const seconds = audioBuffer.duration.toFixed(1);
+    // find the pitch (a few seconds for a long recording)
     const name = file.name;
-
-    // Now find the pitch. This takes a few seconds for a long recording.
-    setStatus(name + " - analysing pitch ... 0%");
+    setStatus("Analysing pitch ... 0%");
     track = await analyzePitch(audioBuffer, {
       onProgress: (fraction) => {
-        if (myLoad === loadId) {
-          setStatus(name + " - analysing pitch ... " + Math.round(fraction * 100) + "%");
-        }
+        if (myLoad === loadId) setStatus("Analysing pitch ... " + Math.round(fraction * 100) + "%");
       },
       isCancelled: () => myLoad !== loadId,
     });
     if (!track || myLoad !== loadId) return;
 
-    pitchView.setTrack(track);
+    // cut it into notes
+    const result = buildNotes(track);
+    notes = result.notes;
+    roll.setNotes(notes, result.refLevel, track.hop, track.duration);
+    updateButtons();
     redraw();
 
-    const voiced = track.freqs.filter((f) => f > 0).length;
-    const percent = Math.round((voiced / track.freqs.length) * 100);
-    // (the file name goes last, so if the text is too long for the screen only the name gets cut)
-    setStatus(seconds + " s - pitch found in " + percent + "% - " + name);
+    const seconds = audioBuffer.duration.toFixed(1);
+    if (notes.length === 0) {
+      setStatus(seconds + " s - no clear notes found. Is this a recording of a voice?");
+    } else {
+      setStatus(
+        seconds + " s - " + notes.length + " notes - edits are a preview for now: the sound is not changed yet - " + name
+      );
+    }
   } catch (error) {
     console.error(error);
     audioBuffer = null;
     peaks = null;
     track = null;
-    pitchView.setTrack(null);
+    notes = [];
+    roll.setNotes([], 1, 0.01, 10);
+    updateButtons();
     redraw();
-    playBtn.disabled = true;
-    stopBtn.disabled = true;
     setStatus("Could not read that file. Try a .wav or .mp3.");
   }
+});
+
+// ---- Correct Pitch, undo, redo ----
+correctBtn.addEventListener("click", () => {
+  if (notes.length === 0) return;
+  const description = selected.size
+    ? selected.size + " selected note" + (selected.size === 1 ? "" : "s")
+    : "All " + notes.length + " notes";
+
+  openCorrectDialog(description, (options) => {
+    const indices = selected.size ? [...selected] : notes.map((_, i) => i);
+    const before = takeSnapshot(notes);
+    correctPitch(notes, indices, before, options);
+    if (!snapshotsEqual(before, takeSnapshot(notes))) history.record(before);
+    if (!source) showSelectionReadout();
+    updateButtons();
+    requestDraw();
+  });
+});
+
+function undo() {
+  const previous = history.undo(takeSnapshot(notes));
+  if (previous) restoreSnapshot(notes, previous);
+  afterHistoryMove();
+}
+function redo() {
+  const next = history.redo(takeSnapshot(notes));
+  if (next) restoreSnapshot(notes, next);
+  afterHistoryMove();
+}
+function afterHistoryMove() {
+  if (!source) showSelectionReadout();
+  updateButtons();
+  requestDraw();
+}
+undoBtn.addEventListener("click", undo);
+redoBtn.addEventListener("click", redo);
+
+// handy on a computer: Ctrl+Z / Ctrl+Shift+Z / Space
+window.addEventListener("keydown", (e) => {
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    if (e.shiftKey) redo();
+    else undo();
+  } else if (e.key === " " && audioBuffer && !(e.target instanceof HTMLButtonElement)) {
+    e.preventDefault();
+    togglePlay();
+  }
+});
+
+// ---- zoom buttons ----
+function zoomBy(factor) {
+  const size = roll.size();
+  zoomAt(view, size.width / 2, size.height / 2, factor, factor, size);
+  roll.userMoved = true;
+  requestDraw();
+}
+zoomInBtn.addEventListener("click", () => zoomBy(1.6));
+zoomOutBtn.addEventListener("click", () => zoomBy(1 / 1.6));
+fitBtn.addEventListener("click", () => gestureApi.fit());
+
+// ---- the overview strip: tap or drag to jump around ----
+function jumpTo(e) {
+  if (!audioBuffer) return;
+  const rect = waveCanvas.getBoundingClientRect();
+  const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const size = roll.size();
+  view.t0 = fraction * audioBuffer.duration - size.width / view.pxPerSec / 2; // centre the view there
+  clampView(view, size);
+  roll.userMoved = true;
+  requestDraw();
+}
+waveCanvas.addEventListener("pointerdown", (e) => {
+  waveCanvas.setPointerCapture(e.pointerId);
+  jumpTo(e);
+});
+waveCanvas.addEventListener("pointermove", (e) => {
+  if (waveCanvas.hasPointerCapture(e.pointerId)) jumpTo(e);
 });
 
 // ---- playback ----
@@ -141,14 +332,20 @@ function play() {
   if (!audioBuffer) return;
   stop();
 
+  // start at the selected note, or at the left edge of what you are looking at
+  let offset = view.t0;
+  if (selected.size > 0) offset = Math.max(0, notes[Math.min(...selected)].start - 0.3);
+  offset = Math.min(offset, Math.max(0, audioBuffer.duration - 0.05));
+
   audioCtx.resume();
   source = audioCtx.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioCtx.destination);
   source.onended = stop; // when the audio ends by itself, clean up
-  source.start();
+  source.start(0, offset);
+  startedAt = audioCtx.currentTime - offset;
 
-  startedAt = audioCtx.currentTime;
+  updateButtons();
   tick();
 }
 
@@ -164,22 +361,66 @@ function stop() {
     source = null;
   }
   cancelAnimationFrame(animationId);
-  readoutEl.textContent = "--";
+  showSelectionReadout();
+  updateButtons();
   redraw();
 }
 
-// Runs about 60 times per second while playing; moves the white playhead line.
+function togglePlay() {
+  if (source) stop();
+  else play();
+}
+
+// Runs about 60 times per second while playing.
 function tick() {
   if (!source) return;
-  const elapsed = audioCtx.currentTime - startedAt;
-  redraw(Math.min(elapsed / audioBuffer.duration, 1));
-  showReadout(elapsed);
+  const t = audioCtx.currentTime - startedAt;
+
+  // scroll along with the music when the playhead reaches the right edge
+  const seconds = roll.size().width / view.pxPerSec;
+  if (t < view.t0 || t > view.t0 + seconds * 0.92) {
+    view.t0 = t - seconds * 0.08;
+    clampView(view, roll.size());
+  }
+
+  redraw();
+  showPlaybackReadout(t);
   animationId = requestAnimationFrame(tick);
 }
 
-playBtn.addEventListener("click", play);
-stopBtn.addEventListener("click", stop);
-window.addEventListener("resize", resizeCanvases);
+playBtn.addEventListener("click", togglePlay);
+
+// ---- theme and full screen ----
+themeBtn.addEventListener("click", () => {
+  setTheme(themeName() === "light" ? "dark" : "light");
+  redraw();
+});
+
+if (document.documentElement.requestFullscreen) {
+  fullBtn.addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+        // on a phone, also lock to sideways while in full screen
+        if (screen.orientation && screen.orientation.lock) await screen.orientation.lock("landscape");
+      }
+    } catch (e) {
+      // not allowed here - ignore
+    }
+  });
+} else {
+  fullBtn.hidden = true;
+}
+
+// A peek inside the app, handy for tests and for exploring in the browser console.
+window.pitchone = { roll, getNotes: () => notes, getSelection: () => [...selected] };
 
 // ---- start ----
-resizeCanvases();
+// Redraw whenever the roll or the overview change size (rotating the phone,
+// entering full screen, ...).
+new ResizeObserver(sizeCanvases).observe(pitchCanvas);
+new ResizeObserver(sizeCanvases).observe(waveCanvas);
+sizeCanvases();
+updateButtons();

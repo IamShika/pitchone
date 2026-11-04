@@ -42,10 +42,11 @@ function downsample(audioBuffer, factor, pad) {
  * @param {object} [options]
  * @param {(fraction:number)=>void} [options.onProgress]  called with 0..1 while working
  * @param {()=>boolean} [options.isCancelled]             return true to stop early
- * @returns {Promise<null | {hop:number, freqs:Float32Array, clarity:Float32Array, duration:number}>}
+ * @returns {Promise<null | {hop:number, freqs:Float32Array, clarity:Float32Array, level:Float32Array, duration:number}>}
  *   hop      seconds between readings (reading i belongs to time i * hop)
  *   freqs    pitch in Hz for each reading, 0 where there is no clear pitch
  *   clarity  0..1 how sure the detector is (1 = very sure)
+ *   level    how loud each reading is (used to draw the blobs thicker where it is louder)
  */
 export async function analyzePitch(audioBuffer, options = {}) {
   const { onProgress = () => {}, isCancelled = () => false } = options;
@@ -63,6 +64,7 @@ export async function analyzePitch(audioBuffer, options = {}) {
 
   const freqs = new Float32Array(frames);
   const clarity = new Float32Array(frames);
+  const level = new Float32Array(frames); // loudness of each reading
 
   // A long recording takes a few seconds. Every ~30 ms we pause for a moment
   // so the page can update the progress text and stay responsive.
@@ -71,6 +73,7 @@ export async function analyzePitch(audioBuffer, options = {}) {
     const result = yin.detect(x, i * hop);
     freqs[i] = result.freq;
     clarity[i] = result.clarity;
+    level[i] = result.rms;
 
     if (i % 32 === 0 && performance.now() - lastBreak > 30) {
       onProgress(i / frames);
@@ -81,7 +84,7 @@ export async function analyzePitch(audioBuffer, options = {}) {
   }
 
   onProgress(1);
-  return { hop: hop / rate, freqs, clarity, duration: audioBuffer.duration };
+  return { hop: hop / rate, freqs, clarity, level, duration: audioBuffer.duration };
 }
 
 /** Index of the reading that belongs to time `seconds`. */
