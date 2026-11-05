@@ -3,8 +3,10 @@
 //   open a file -> decode -> find the pitch -> cut it into notes -> show blobs
 //   tap / drag / zoom the notes, Correct Pitch, undo, play.
 //
-// Stage 3 + 4: you can edit the pitch of notes on screen. The SOUND is not
-// changed yet (that is Stage 5), so Play still plays the original recording.
+// You can edit the pitch of notes on screen, and you hear the result:
+//   press a note        -> plays that note at the pitch it is set to
+//   drag across a note  -> plays the part under your finger
+//   Play                -> plays the whole recording with your edits (or the original if there are none)
 
 import { computePeaks, drawWaveform } from "./waveform.js";
 import { analyzePitch, frameAt } from "./pitch.js";
@@ -13,7 +15,9 @@ import { createRoll, GUTTER_PX } from "./pitchview.js";
 import { attachGestures } from "./gestures.js";
 import { clampView, zoomAt } from "./view.js";
 import { freqToMidi, midiToName, centsOff } from "./notes.js";
-import { takeSnapshot, restoreSnapshot, snapshotsEqual, moveNotes, correctPitch } from "./correct.js";
+import { takeSnapshot, restoreSnapshot, snapshotsEqual, moveNotes, correctPitch, isEdited, editedCurve } from "./correct.js";
+import { createAuditioner } from "./audition.js";
+import { mixToMono, renderEdited } from "./psola.js";
 import { createHistory } from "./history.js";
 import { openCorrectDialog } from "./correctdialog.js";
 import { loadTheme, setTheme, themeName } from "./theme.js";
@@ -54,13 +58,46 @@ let startedAt = 0;        // audioCtx.currentTime minus the position we started 
 let animationId = 0;      // handle for the playback animation loop
 let loadId = 0;           // bumps on every new file, so old analyses can be cancelled
 let dragStart = null;     // snapshot taken when a drag begins
+let dragHit = -1;         // the note being dragged
 let drawQueued = false;
+let preparing = false;     // true while the edited sound is being made
+let channels = [];        // the original audio, one array per channel
+let mono = null;          // the same audio mixed to one channel
+let editedCache = { key: "", buffer: null }; // the recording with all edits applied (remembered)
+let idleStatus = "Open a vocal recording to start."; // what the status line says when nothing is playing
+
+const audition = createAuditioner({
+  getContext: () => audioCtx,
+  getAudio: () => (audioBuffer && track ? { buffer: audioBuffer, channels, mono, hop: track.hop } : null),
+});
 
 const setStatus = (text) => (statusEl.textContent = text);
+function setIdleStatus(text) {
+  idleStatus = text;
+  setStatus(text);
+}
 
 // ---- drawing ----
 function playTime() {
-  return source ? audioCtx.currentTime - startedAt : null;
+  if (source) return audioCtx.currentTime - startedAt;
+  return audition.getTime(); // a pressed note is sounding (or null)
+}
+
+// While a note is sounding, keep redrawing so the playhead moves.
+let auditionLoopRunning = false;
+function startAuditionLoop() {
+  if (auditionLoopRunning) return;
+  auditionLoopRunning = true;
+  const step = () => {
+    if (source || audition.getTime() === null) {
+      auditionLoopRunning = false;
+      redraw(); // clears the playhead
+      return;
+    }
+    redraw();
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 function redraw() {
@@ -124,7 +161,15 @@ function showSelectionReadout() {
 }
 
 function showPlaybackReadout(seconds) {
-  const freq = track ? track.freqs[frameAt(track, seconds)] : 0;
+  if (!track) return;
+  // inside an edited note we are playing the NEW pitch, so show that
+  const note = notes.find((n) => seconds >= n.start && seconds < n.end);
+  if (note && isEdited(note)) {
+    const k = Math.min(note.midi.length - 1, Math.max(0, Math.floor((seconds - note.start) / track.hop)));
+    readoutEl.textContent = describePitch(editedCurve(note)[k]);
+    return;
+  }
+  const freq = track.freqs[frameAt(track, seconds)];
   readoutEl.textContent = freq > 0 ? describePitch(freqToMidi(freq)) : "--";
 }
 
@@ -148,18 +193,41 @@ const gestureApi = {
   },
   clearSelection: () => setSelection([]),
 
-  beginDrag() {
+  // a note was pressed: play it (at the pitch it is set to)
+  press(index) {
+    if (source) stop(); // the main playback and a note preview should not play together
+    audition.playNote(notes[index]);
+    startAuditionLoop();
+  },
+  // the finger moves sideways across a note: play the part under it
+  scrub(index, seconds) {
+    audition.scrub(notes[index], seconds);
+    startAuditionLoop();
+  },
+  stopAudition() {
+    audition.stop();
+  },
+
+  beginDrag(index) {
     dragStart = takeSnapshot(notes);
+    dragHit = index;
   },
   dragBy(semitones) {
     moveNotes(notes, [...selected], dragStart, semitones);
     if (!source) showSelectionReadout();
+    audition.pitchPulse(notes[dragHit]); // a short blip so you hear the new pitch while dragging
+    startAuditionLoop();
     requestDraw();
   },
   endDrag() {
     const changed = notes.some((n, i) => Math.abs(n.targetCenter - dragStart[i].targetCenter) > 1e-6);
-    if (changed) history.record(dragStart);
-    else restoreSnapshot(notes, dragStart);
+    if (changed) {
+      history.record(dragStart);
+      audition.playNote(notes[dragHit]); // let go: hear the whole note at its new pitch
+      startAuditionLoop();
+    } else {
+      restoreSnapshot(notes, dragStart);
+    }
     dragStart = null;
     updateButtons();
     requestDraw();
@@ -167,6 +235,7 @@ const gestureApi = {
   cancelDrag() {
     if (dragStart) restoreSnapshot(notes, dragStart);
     dragStart = null;
+    audition.stop();
     if (!source) showSelectionReadout();
     requestDraw();
   },
@@ -186,13 +255,15 @@ fileInput.addEventListener("change", async () => {
 
   const myLoad = ++loadId; // if the user opens another file, this number becomes stale
   stop();
+  audition.stop();
+  editedCache = { key: "", buffer: null };
   track = null;
   notes = [];
   selected = new Set();
   history.clear();
   roll.setNotes([], 1, 0.01, audioBuffer ? audioBuffer.duration : 10);
   readoutEl.textContent = "--";
-  setStatus("Reading " + file.name + " ...");
+  setIdleStatus("Reading " + file.name + " ...");
   updateButtons();
 
   try {
@@ -204,6 +275,8 @@ fileInput.addEventListener("change", async () => {
     audioBuffer = await audioCtx.decodeAudioData(bytes);
     if (myLoad !== loadId) return;
 
+    channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, c) => audioBuffer.getChannelData(c));
+    mono = mixToMono(channels);
     peaks = computePeaks(audioBuffer, waveCanvas.width);
     roll.setNotes([], 1, 0.01, audioBuffer.duration);
     updateButtons();
@@ -211,10 +284,10 @@ fileInput.addEventListener("change", async () => {
 
     // find the pitch (a few seconds for a long recording)
     const name = file.name;
-    setStatus("Analysing pitch ... 0%");
+    setIdleStatus("Analysing pitch ... 0%");
     track = await analyzePitch(audioBuffer, {
       onProgress: (fraction) => {
-        if (myLoad === loadId) setStatus("Analysing pitch ... " + Math.round(fraction * 100) + "%");
+        if (myLoad === loadId) setIdleStatus("Analysing pitch ... " + Math.round(fraction * 100) + "%");
       },
       isCancelled: () => myLoad !== loadId,
     });
@@ -229,11 +302,9 @@ fileInput.addEventListener("change", async () => {
 
     const seconds = audioBuffer.duration.toFixed(1);
     if (notes.length === 0) {
-      setStatus(seconds + " s - no clear notes found. Is this a recording of a voice?");
+      setIdleStatus(seconds + " s - no clear notes found. Is this a recording of a voice?");
     } else {
-      setStatus(
-        seconds + " s - " + notes.length + " notes - edits are a preview for now: the sound is not changed yet - " + name
-      );
+      setIdleStatus(seconds + " s - " + notes.length + " notes - press a note to hear it, Play plays your edits - " + name);
     }
   } catch (error) {
     console.error(error);
@@ -244,7 +315,7 @@ fileInput.addEventListener("change", async () => {
     roll.setNotes([], 1, 0.01, 10);
     updateButtons();
     redraw();
-    setStatus("Could not read that file. Try a .wav or .mp3.");
+    setIdleStatus("Could not read that file. Try a .wav or .mp3.");
   }
 });
 
@@ -328,23 +399,51 @@ waveCanvas.addEventListener("pointermove", (e) => {
 });
 
 // ---- playback ----
-function play() {
-  if (!audioBuffer) return;
+
+/** What to play: the original, or (if any note was edited) the recording with all edits applied. */
+async function getPlayableBuffer() {
+  if (!notes.some(isEdited)) return { buffer: audioBuffer, edited: false };
+
+  const key = notes.map((n) => n.targetCenter.toFixed(4) + "|" + n.drift.toFixed(3)).join(",");
+  if (editedCache.key !== key) {
+    setStatus("Preparing your edited sound ...");
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the screen show that message first
+
+    const out = renderEdited(channels, audioBuffer.sampleRate, notes, track.hop);
+    const buffer = audioCtx.createBuffer(out.length, out[0].length, audioBuffer.sampleRate);
+    out.forEach((data, c) => buffer.copyToChannel(data, c));
+    editedCache = { key, buffer };
+  }
+  return { buffer: editedCache.buffer, edited: true };
+}
+
+async function play() {
+  if (!audioBuffer || preparing) return;
   stop();
+  audition.stop();
 
   // start at the selected note, or at the left edge of what you are looking at
   let offset = view.t0;
   if (selected.size > 0) offset = Math.max(0, notes[Math.min(...selected)].start - 0.3);
   offset = Math.min(offset, Math.max(0, audioBuffer.duration - 0.05));
 
+  preparing = true;
+  let playable;
+  try {
+    playable = await getPlayableBuffer();
+  } finally {
+    preparing = false;
+  }
+
   audioCtx.resume();
   source = audioCtx.createBufferSource();
-  source.buffer = audioBuffer;
+  source.buffer = playable.buffer;
   source.connect(audioCtx.destination);
   source.onended = stop; // when the audio ends by itself, clean up
   source.start(0, offset);
   startedAt = audioCtx.currentTime - offset;
 
+  setStatus(playable.edited ? "Playing your EDITED version" : "Playing the original (you have not changed any notes yet)");
   updateButtons();
   tick();
 }
@@ -361,6 +460,7 @@ function stop() {
     source = null;
   }
   cancelAnimationFrame(animationId);
+  setStatus(idleStatus);
   showSelectionReadout();
   updateButtons();
   redraw();
@@ -415,7 +515,7 @@ if (document.documentElement.requestFullscreen) {
 }
 
 // A peek inside the app, handy for tests and for exploring in the browser console.
-window.pitchone = { roll, getNotes: () => notes, getSelection: () => [...selected] };
+window.pitchone = { roll, audition, getNotes: () => notes, getSelection: () => [...selected] };
 
 // ---- start ----
 // Redraw whenever the roll or the overview change size (rotating the phone,

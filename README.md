@@ -22,13 +22,11 @@ Scope: **single voice (monophonic) only**. Chords and polyphonic editing are out
 | 1 | Load an audio file, draw the waveform, play / stop | yes |
 | 2 | Detect pitch over time (YIN algorithm), piano roll, live note readout | yes |
 | 3 | Clean the pitch curve and cut it into notes, drawn as blobs | yes |
-| 4 | Edit the notes on screen: drag, Correct Pitch (Pitch Center / Pitch Drift / snap to scale), undo / redo, zoom | yes (picture only) |
-| 5 | Re-synthesize the audio with the edited pitches (PSOLA) | |
+| 4 | Edit the notes on screen: drag, Correct Pitch (Pitch Center / Pitch Drift / snap to scale), undo / redo, zoom | yes |
+| 5 | Hear the edits: press a note, scrub across it, and Play plays the corrected recording (PSOLA pitch shifting) | yes |
 | 6 | Record from the microphone | |
 | 7 | Export the result as a WAV file | |
 | 8 | Package as an Android APK with GitHub Actions (Capacitor) | |
-
-**Important:** until Stage 5, editing changes the *picture* only. **Play** still plays the original recording.
 
 ## How to use it
 
@@ -36,8 +34,9 @@ Open the app, tap **Open** and choose a recording of a voice. After a few second
 
 | Do this | To get this |
 |---------|-------------|
-| Tap a blob | Select it (its note name and cents show at the top right) |
-| Drag a blob up / down | Change its pitch |
+| Press a blob | Hear that note, at the pitch it is set to. It is also selected when you let go (its note name and cents show at the top right) |
+| Drag sideways across a blob | Hear the part under your finger (the white line shows where) |
+| Drag a blob up / down | Change its pitch. You hear it while you drag, and the whole note when you let go |
 | Press and hold a blob | Add it to / remove it from the selection |
 | Tap empty space | Deselect |
 | Drag empty space | Scroll |
@@ -45,7 +44,7 @@ Open the app, tap **Open** and choose a recording of a voice. After a few second
 | Double-tap empty space, or the fit button | Show everything |
 | Tap or drag the strip at the bottom | Jump around the recording |
 | **Correct Pitch** | Open the correction window (applies to the selected notes, or all notes if none are selected) |
-| **Play** | Play from the selected note, or from the left edge of the screen |
+| **Play** | Play the whole recording **with your edits** (the original if you have not changed anything), from the selected note or from the left edge of the screen |
 | Undo / redo buttons (Ctrl+Z / Ctrl+Shift+Z on a computer) | Go back / forward |
 | Half-moon button | Switch between the light and dark theme |
 | Corner button | Full screen (and landscape lock on phones that allow it) |
@@ -75,14 +74,16 @@ Why a server? The code uses JavaScript modules, which browsers refuse to load wh
 
 1. **Pitch detection** (`yin.js`, `pitch.js`). The recording is made mono and its sample rate is lowered to about 15 kHz. Every 10 ms the [YIN algorithm](http://audition.ens.fr/adc/pdf/2002_JASA_YIN.pdf) compares a short slice of audio with a copy of itself shifted by different amounts. The shift where the two match best is the length of one wave cycle, and `frequency = sampleRate / cycle length`. Silence, breath and consonants like "s" get "no pitch".
 2. **Notes** (`segment.js`). Glitches are removed with a median filter. The curve is then described as a staircase of flat notes, where each extra step has to "pay" a penalty: a real change of note improves the fit a lot, vibrato only a little, so vibrato never splits a note. Dips in volume split repeated notes ("la la la"). Notes that are too short are merged into their neighbours.
-3. **Editing** (`correct.js`). Every note keeps the pitch that was sung and a target pitch. Inside a note, the wobble is split into slow drift and fast vibrato: `edited pitch = target + drift x (1 - drift amount) + vibrato`. Stage 5 will use this to re-synthesize the sound.
-4. **Drawing and fingers** (`pitchview.js`, `view.js`, `gestures.js`). The roll draws the note rows, blobs and pitch lines. The view converts between pixels and (seconds, note number).
+3. **Editing** (`correct.js`). Every note keeps the pitch that was sung and a target pitch. Inside a note, the wobble is split into slow drift and fast vibrato: `edited pitch = target + drift x (1 - drift amount) + vibrato`.
+4. **Changing the sound** (`psola.js`). A voiced sound is a wave that repeats once per "period". PSOLA cuts the voice into one little grain per repeat, then puts the grains back closer together (higher pitch) or further apart (lower pitch) and overlaps them. Every grain keeps the voice's original shape, so the tone colour stays (no chipmunk voice) and the length does not change. Only edited notes are re-created. Everything else (breaths, consonants, untouched notes) is copied from the original, with a 15 ms crossfade at the edges.
+5. **Previews** (`audition.js`). Pressing or scrubbing a note plays a piece of its sound (re-created if the note was edited, and remembered so the second press is instant).
+6. **Drawing and fingers** (`pitchview.js`, `view.js`, `gestures.js`). The roll draws the note rows, blobs and pitch lines. The view converts between pixels and (seconds, note number).
 
 Settings you can play with: `SETTINGS` at the top of `src/segment.js` (for example `splitPenalty`: higher = fewer, longer notes) and `src/yin.js` (`threshold`, `silenceRms`).
 
 ## Tests
 
-The tests make fake "voices" and fake pitch tracks with maths (steady notes, glides, vibrato, jitter, silence, noise) and check the detector, the note finder and the editing maths. They need Node.js:
+The tests make fake "voices" and fake pitch tracks with maths (steady notes, glides, vibrato, jitter, silence, noise) and check the detector, the note finder, the editing maths and the pitch shifter (does the shifted voice really have the new pitch, the same length and loudness, and the same tone colour?). They need Node.js:
 
 ```bash
 pkg install nodejs
@@ -102,6 +103,8 @@ pitchone/
     pitch.js           runs YIN over a whole recording -> pitch track
     segment.js         pitch track -> notes
     correct.js         scales, moving notes, Correct Pitch, drift
+    psola.js           pitch shifting: re-creates notes (or the whole recording) at their edited pitch
+    audition.js        plays a note or a slice of it (press, scrub, drag blips)
     history.js         undo / redo
     view.js            zoom / scroll maths
     pitchview.js       draws the roll and the blobs
@@ -115,6 +118,7 @@ pitchone/
     yin.test.js        pitch detection tests
     segment.test.js    note finding tests
     edit.test.js       editing, undo and zoom tests
+    psola.test.js      pitch shifter tests
 ```
 
 ## Publish it on GitHub from Termux

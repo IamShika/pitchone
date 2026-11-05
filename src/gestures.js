@@ -1,10 +1,11 @@
 // gestures.js
 // Finger (and mouse) control of the roll.
 //
-//   tap a note            select it
+//   press a note          hear that note (at the pitch it is set to) and select it when you let go
+//   drag across a note    (sideways) hear the part under your finger
+//   drag a note up/down   change its pitch (you hear it while you drag, and the whole note when you let go)
+//   hold a note           add it to / remove it from the selection
 //   tap empty space       deselect everything (double-tap: show everything)
-//   press and hold a note add it to / remove it from the selection
-//   drag a note up/down   change its pitch
 //   drag empty space      scroll
 //   two fingers           pinch to zoom (sideways spread = time, up/down spread = pitch)
 //   mouse wheel           zoom time  (Shift + wheel = zoom pitch, sideways wheel = scroll)
@@ -13,7 +14,7 @@
 // (select, move a note, redraw) is done by the `api` functions main.js passes in.
 
 import { GUTTER_PX } from "./pitchview.js";
-import { clampView, zoomAt, pinchTo } from "./view.js";
+import { clampView, zoomAt, pinchTo, timeOfX } from "./view.js";
 
 const SLOP = 6;            // finger must move this many pixels before it counts as a drag
 const LONG_PRESS_MS = 450; // how long to hold to add a note to the selection
@@ -27,7 +28,10 @@ const DOUBLE_TAP_MS = 350;
  * @param {(indices:number[])=>void} api.select       replace the selection
  * @param {(index:number)=>void} api.toggle           add/remove one note
  * @param {()=>void} api.clearSelection
- * @param {()=>void} api.beginDrag
+ * @param {(index:number)=>void} api.press        a note was pressed: play it
+ * @param {(index:number, seconds:number)=>void} api.scrub   finger is moving across a note
+ * @param {()=>void} api.stopAudition
+ * @param {(index:number)=>void} api.beginDrag
  * @param {(semitones:number)=>void} api.dragBy
  * @param {()=>void} api.endDrag
  * @param {()=>void} api.cancelDrag
@@ -49,6 +53,7 @@ export function attachGestures(canvas, api) {
   };
 
   function startPinch() {
+    api.stopAudition();
     if (single) {
       clearTimeout(single.timer);
       if (single.mode === "drag") api.cancelDrag();
@@ -88,6 +93,7 @@ export function attachGestures(canvas, api) {
       timer: null,
     };
     if (hit >= 0) {
+      api.press(hit); // hear the note right away
       single.timer = setTimeout(() => {
         if (single && single.mode === "undecided") {
           single.longPressed = true;
@@ -123,15 +129,25 @@ export function attachGestures(canvas, api) {
       if (Math.hypot(p.x - single.x0, p.y - single.y0) < SLOP) return;
       clearTimeout(single.timer);
       if (single.hit >= 0) {
-        single.mode = "drag";
-        if (!api.getSelection().has(single.hit)) api.select([single.hit]);
-        api.beginDrag();
+        // on a note: sideways = scrub through its sound, up/down = move its pitch
+        const dx = Math.abs(p.x - single.x0);
+        const dy = Math.abs(p.y - single.y0);
+        if (dx > dy * 1.2) {
+          single.mode = "scrub";
+        } else {
+          single.mode = "drag";
+          api.stopAudition(); // the press sound is at the old pitch
+          if (!api.getSelection().has(single.hit)) api.select([single.hit]);
+          api.beginDrag(single.hit);
+        }
       } else {
         single.mode = "pan";
       }
     }
 
-    if (single.mode === "drag") {
+    if (single.mode === "scrub") {
+      api.scrub(single.hit, timeOfX(view, p.x - GUTTER_PX));
+    } else if (single.mode === "drag") {
       api.dragBy(-(p.y - single.y0) / view.rowH); // finger up = pitch up
     } else if (single.mode === "pan") {
       view.t0 = single.t0 - (p.x - single.x0) / view.pxPerSec;
@@ -153,7 +169,9 @@ export function attachGestures(canvas, api) {
     if (!single || single.id !== e.pointerId) return;
     clearTimeout(single.timer);
 
-    if (single.mode === "drag") {
+    if (single.mode === "scrub") {
+      api.stopAudition();
+    } else if (single.mode === "drag") {
       if (cancelled) api.cancelDrag();
       else api.endDrag();
     } else if (single.mode === "undecided" && !single.longPressed && !cancelled) {
