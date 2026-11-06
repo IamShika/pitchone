@@ -6,6 +6,7 @@
 // phone screens with setTransform). The view (src/view.js) says which part of
 // the recording and which notes are on screen.
 
+import { loudnessColor, loudnessOf } from "./heat.js";
 import { colors } from "./theme.js";
 import { midiToName, isBlackKey } from "./notes.js";
 import { editedCurve, isEdited } from "./correct.js";
@@ -230,13 +231,28 @@ export function createRoll(canvas) {
     for (let j = frames.length - 1; j >= 0; j--) ctx.lineTo(xOf(frames[j]), yCentre + halfThickness(frames[j]));
     ctx.closePath();
 
-    const gradient = ctx.createLinearGradient(0, yCentre - fullThick / 2, 0, yCentre + fullThick / 2);
-    gradient.addColorStop(0, c.blobEdge);
-    gradient.addColorStop(0.3, c.blobMid);
-    gradient.addColorStop(0.5, c.blobCore);
-    gradient.addColorStop(0.7, c.blobMid);
-    gradient.addColorStop(1, c.blobEdge);
-    ctx.fillStyle = gradient;
+    // Colour along the note = loudness: dark red where it is quiet, bright yellow where it is loud.
+    const xStart = xOf(0);
+    const width = Math.max(1, xEnd - xStart);
+    const heat = ctx.createLinearGradient(xStart, 0, xStart + width, 0);
+    const colourEvery = Math.max(1, Math.floor(count / 48)); // at most ~48 colour stops
+    for (let k = 0; k < count; k += colourEvery) {
+      // average a few neighbouring frames so one noisy frame does not flicker
+      let sum = 0, n = 0;
+      for (let j = Math.max(0, k - 2); j <= Math.min(count - 1, k + 2); j++) { sum += note.level[j]; n++; }
+      const stop = Math.min(1, Math.max(0, (xOf(k) - xStart) / width));
+      heat.addColorStop(stop, loudnessColor(loudnessOf(sum / n, refLevel)));
+    }
+    ctx.fillStyle = heat;
+    ctx.fill();
+
+    // a little shading across the thickness, so the blob looks round (light in the middle, darker at the edges)
+    const shade = ctx.createLinearGradient(0, yCentre - fullThick / 2, 0, yCentre + fullThick / 2);
+    shade.addColorStop(0, "rgba(0,0,0,0.28)");
+    shade.addColorStop(0.45, "rgba(255,255,255,0.16)");
+    shade.addColorStop(0.55, "rgba(255,255,255,0.16)");
+    shade.addColorStop(1, "rgba(0,0,0,0.28)");
+    ctx.fillStyle = shade;
     ctx.fill();
     ctx.lineJoin = "round";
     ctx.lineWidth = 1;

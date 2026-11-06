@@ -16,6 +16,9 @@
 
     <button id="play" class="primary" disabled title="Play from the selected note, or from the left edge of the screen">Play</button>
     <button id="correct" disabled title="Correct pitch of the selected notes (or all notes)">Correct Pitch</button>
+    <button id="export" class="icon" disabled title="Export: save the result as a WAV, FLAC or MP3 file" aria-label="Export">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M4 20h16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
 
     <span class="sep"></span>
 
@@ -97,6 +100,38 @@
       <span class="spacer"></span>
       <button id="c-cancel">Cancel</button>
       <button id="c-ok" class="primary">OK</button>
+    </div>
+  </dialog>
+
+  <!-- The Export window -->
+  <dialog id="export-dialog">
+    <div class="dlg-title">Export</div>
+    <div class="dlg-body">
+      <label class="dlg-row">
+        <span class="dlg-label">File name</span>
+        <input id="x-name" type="text" class="dlg-text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="120">
+        <output id="x-ext">.wav</output>
+      </label>
+      <div class="dlg-row">
+        <span class="dlg-label">Format</span>
+        <div class="segmented" role="radiogroup" aria-label="Format">
+          <button type="button" class="seg" data-format="wav" role="radio">WAV</button>
+          <button type="button" class="seg" data-format="flac" role="radio">FLAC</button>
+          <button type="button" class="seg" data-format="mp3" role="radio">MP3</button>
+        </div>
+      </div>
+      <label class="dlg-row">
+        <span class="dlg-label" id="x-option-label">Quality</span>
+        <select id="x-option" aria-labelledby="x-option-label"></select>
+      </label>
+      <p id="x-note" class="dlg-note"></p>
+      <progress id="x-progress" max="1" value="0" hidden></progress>
+    </div>
+    <div class="dlg-footer">
+      <span id="x-message" class="dlg-message"></span>
+      <span class="spacer"></span>
+      <button id="x-cancel">Cancel</button>
+      <button id="x-ok" class="primary">Export</button>
     </div>
   </dialog>
 

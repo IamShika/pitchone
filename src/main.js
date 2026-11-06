@@ -20,6 +20,8 @@ import { createAuditioner } from "./audition.js";
 import { mixToMono, renderEdited } from "./psola.js";
 import { createHistory } from "./history.js";
 import { openCorrectDialog } from "./correctdialog.js";
+import { openExportDialog } from "./exportdialog.js";
+import { suggestName } from "./exporter.js";
 import { loadTheme, setTheme, themeName } from "./theme.js";
 
 // ---- the things on the page ----
@@ -31,6 +33,7 @@ const statusEl = $("status");
 const readoutEl = $("readout");
 const playBtn = $("play");
 const correctBtn = $("correct");
+const exportBtn = $("export");
 const undoBtn = $("undo");
 const redoBtn = $("redo");
 const zoomInBtn = $("zoom-in");
@@ -64,6 +67,7 @@ let preparing = false;     // true while the edited sound is being made
 let channels = [];        // the original audio, one array per channel
 let mono = null;          // the same audio mixed to one channel
 let editedCache = { key: "", buffer: null }; // the recording with all edits applied (remembered)
+let fileName = "";         // name of the opened file (suggests the export name)
 let idleStatus = "Open a vocal recording to start."; // what the status line says when nothing is playing
 
 const audition = createAuditioner({
@@ -137,6 +141,7 @@ function updateButtons() {
   playBtn.disabled = !audioBuffer;
   playBtn.textContent = source ? "Stop" : "Play";
   correctBtn.disabled = !hasNotes;
+  exportBtn.disabled = !audioBuffer || preparing;
   zoomInBtn.disabled = !hasNotes;
   zoomOutBtn.disabled = !hasNotes;
   fitBtn.disabled = !hasNotes;
@@ -254,6 +259,7 @@ fileInput.addEventListener("change", async () => {
   if (!file) return;
 
   const myLoad = ++loadId; // if the user opens another file, this number becomes stale
+  fileName = file.name;
   stop();
   audition.stop();
   editedCache = { key: "", buffer: null };
@@ -270,6 +276,7 @@ fileInput.addEventListener("change", async () => {
     // Browsers only allow audio to start after a user tap, so we create
     // the AudioContext here (inside a tap handler).
     audioCtx = audioCtx || new AudioContext();
+    audition.prepare(); // load the smooth scrubber in the background
 
     const bytes = await file.arrayBuffer();
     audioBuffer = await audioCtx.decodeAudioData(bytes);
@@ -334,6 +341,24 @@ correctBtn.addEventListener("click", () => {
     if (!source) showSelectionReadout();
     updateButtons();
     requestDraw();
+  });
+});
+
+// ---- Export ----
+exportBtn.addEventListener("click", () => {
+  if (!audioBuffer) return;
+  stop();
+  audition.stop();
+  openExportDialog({
+    name: suggestName(fileName),
+    // the recording with all edits applied (the original if nothing was changed)
+    getAudio: async () => {
+      const playable = await getPlayableBuffer();
+      const out = [];
+      for (let c = 0; c < playable.buffer.numberOfChannels; c++) out.push(playable.buffer.getChannelData(c));
+      return { channels: out, sampleRate: playable.buffer.sampleRate };
+    },
+    onDone: () => setStatus(idleStatus),
   });
 });
 

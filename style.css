@@ -113,8 +113,11 @@ select:focus-visible {
 
 /* the "A4 +12c" display */
 #readout {
-  min-width: 5.2em;
-  padding: 0 8px;
+  flex: none;
+  width: 6.4em; /* fixed, so the toolbar never changes shape while the text changes */
+  padding: 0 4px;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 1.05rem;
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -278,6 +281,72 @@ select:disabled {
 }
 
 #c-target {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---- the Export window ---- */
+
+.dlg-text {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--btn);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+#x-ext {
+  width: 3.2em;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.segmented {
+  display: inline-flex;
+}
+
+.segmented .seg {
+  min-width: 64px;
+  border-radius: 0;
+  margin-left: -1px;
+}
+
+.segmented .seg:first-child {
+  margin-left: 0;
+  border-radius: 6px 0 0 6px;
+}
+
+.segmented .seg:last-child {
+  border-radius: 0 6px 6px 0;
+}
+
+.segmented .seg[aria-checked="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.dlg-note {
+  min-height: 1.2em;
+  margin: 2px 0 4px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+#x-progress {
+  width: 100%;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
+.dlg-message {
   color: var(--muted);
   font-size: 0.85rem;
 }

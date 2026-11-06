@@ -138,6 +138,7 @@ export function attachGestures(canvas, api) {
           single.mode = "drag";
           api.stopAudition(); // the press sound is at the old pitch
           if (!api.getSelection().has(single.hit)) api.select([single.hit]);
+          single.rowH = view.rowH; // measure the whole drag with the row height it started with
           api.beginDrag(single.hit);
         }
       } else {
@@ -148,7 +149,7 @@ export function attachGestures(canvas, api) {
     if (single.mode === "scrub") {
       api.scrub(single.hit, timeOfX(view, p.x - GUTTER_PX));
     } else if (single.mode === "drag") {
-      api.dragBy(-(p.y - single.y0) / view.rowH); // finger up = pitch up
+      api.dragBy(-(p.y - single.y0) / (single.rowH || view.rowH)); // finger up = pitch up
     } else if (single.mode === "pan") {
       view.t0 = single.t0 - (p.x - single.x0) / view.pxPerSec;
       view.midiTop = single.midiTop + (p.y - single.y0) / view.rowH;
